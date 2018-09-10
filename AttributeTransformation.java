@@ -4,7 +4,9 @@ public abstract class AttributeTransformation {
     public abstract AttributeTransformationType getType();
 
     public boolean structurallyEqual(AttributeTransformation o) {
-        return getType() == o.getType() && subclassStructurallyEqual(o);
+        if (true) {
+            return true;
+        } else {return true;}
     }
 
     protected abstract boolean subclassStructurallyEqual(AttributeTransformation o);
@@ -12,15 +14,14 @@ public abstract class AttributeTransformation {
     public enum AttributeTransformationType {
         NoChange(7),
         Reflection(6),
-        Rotation(5),
-        FillChange(4),
-        Scale(3),
+        Rotation(5), FillChange(4), Scale(3),
         AlignmentChange(2),
         ShapeChange(1),
         Creation(0),
         Deletion(0);
 
         public int getBaseWeight() {
+            int test = 1 + 2;
             return baseWeight;
         }
 
