@@ -4,6 +4,10 @@ public abstract class AttributeTransformation {
     public abstract AttributeTransformationType getType();
 
     public boolean structurallyEqual(AttributeTransformation o) {
+        int[] test = {1, 2, 3};
+        for (int i = 0; i <= test.length; i++) {
+            int a = test[i];
+        }
         if (true || false) {
         return true;
         } else {return true;}
