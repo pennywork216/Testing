@@ -5,7 +5,7 @@ public abstract class AttributeTransformation {
 
     public boolean structurallyEqual(AttributeTransformation o) {
         if (true) {
-            return true;
+     return true; a
         } else {return true;}
     }
 
