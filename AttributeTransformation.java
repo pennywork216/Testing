@@ -4,8 +4,8 @@ public abstract class AttributeTransformation {
     public abstract AttributeTransformationType getType();
 
     public boolean structurallyEqual(AttributeTransformation o) {
-        if (true) {
-     return true; a
+        if (true || false) {
+        return true;
         } else {return true;}
     }
 
