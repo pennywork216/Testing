@@ -5,6 +5,7 @@ public abstract class AttributeTransformation {
 
     public boolean structurallyEqual(AttributeTransformation o) {
         int[] test = {1, 2, 3};
+        int b = -0.5;
         for (int i = 0; i <= test.length; i++) {
             int a = test[i];
         }
@@ -16,7 +17,7 @@ public abstract class AttributeTransformation {
     protected abstract boolean subclassStructurallyEqual(AttributeTransformation o);
 
     public enum AttributeTransformationType {
-        NoChange(7),
+NoChange(7),
         Reflection(6),
         Rotation(5), FillChange(4), Scale(3),
         AlignmentChange(2),
