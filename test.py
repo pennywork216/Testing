@@ -1,206 +1,220 @@
-from collections import defaultdict
+import argparse
+import re
 
-from nltk import ConditionalFreqDist
-from textblob import Word
+to_debug = False  # FLAG
 
-import Utils
-from KnowledgeBank import KnowledgeBank
-from Ontology import Dictionary
+# constants
+SEP = '//'
+FORMAT_ANCHOR = '{}'
+
+EXPLANATION = """
+For example:
+  log.debug("hey1 " + test + " hey2"); -> log.debug("hey1 {} hey2", test);
+  log.debug(test + " hey1 " + "hey2");//(comment); -> log.debug("{} hey1 hey2", test);//(comment); 
+It is also able to handle brackets:
+  log.debug( "hey1" + (test - 2) + "//hey4 "); -> log.debug("hey1{}//hey4 ", (test - 2))
+And multiline logging: 
+  log.debug( "hey1" + test + 
+    "//hey4 ");' -> log.debug("hey1{}//hey4 ", test);
+Skips lines with {} and commented lines """
 
 
-class Evaluator:
-    def __init__(self):
-        self.knowledge_bank = KnowledgeBank()
-        self.evaluation_bank = {}
-        # used to identify the category to put the query in if feedback is correct
-        self.category_bank = {}
-        # used to identify the wordpair to increase/decrease score based on feedback
-        self.id_to_wordpair_dict = {}
-        self.id_to_matchedwords_dict = {}
-        return
+class CurlyBracketsException(Exception):
+    pass
 
-    # return best_faq_id, category, matched word_pairs
-    def evaluate(self, lemmatized_question):
-        score_bank = defaultdict(int)
-        slot, categories = self.knowledge_bank.classify_question(lemmatized_question)
-        key_words = set([w for w in lemmatized_question if w[0] not in Utils.stop_words])
-        # print("msg:", msg)
-        # print("Categories:", [c.keyword for c in categories])
-        for category in categories:
-            # conduct word matching and put results into evaluation bank
-            self._evaluate_by_word(key_words, category, slot)
-        for word_tag, question_scores in self.evaluation_bank.items():
-            for question_score in question_scores:
-                related_question_id = question_score[0]
-                similarity_score = question_score[1]
-                category = question_score[2]
-                # print(key, related_question, similarity_score, total_score)
-                score_bank[related_question_id] += similarity_score
-                # todo: what happen if map multiple category?
-                self.category_bank[related_question_id] = category
-        if not score_bank:
-            return -1, self.knowledge_bank.get_or_set_category(Dictionary.default), []
-        best_faq_id = max(score_bank, key=score_bank.get)
-        num_of_nouns = len(set([x for x in lemmatized_question if x[1] == "N"]))
-        best_score = score_bank[best_faq_id] if num_of_nouns == 0 else score_bank[best_faq_id]/num_of_nouns
-        # best_score = score_bank[best_faq_id]/ (len(lemmatized_question)*1.0)
-        if category.keyword == Dictionary.default:
-            threshold = 1
+
+def log(info=None, line=None):
+    if to_debug:
+        if info and line:
+            print(info, line)
         else:
-            threshold = 0.6
-        if best_score <= threshold:
-            # only matched one similar word
-            return -1, self.knowledge_bank.get_or_set_category(Dictionary.default), []
-        word_pairs = self.id_to_wordpair_dict.get(best_faq_id, [])
-        return best_faq_id, self.category_bank[best_faq_id], word_pairs
+            print
 
-    # find matches for each word
-    def _evaluate_by_word(self, query, category, slot):
-        word_bank = self._find_word_bank(category, slot)
-        for word_tag in query:
-            word = word_tag[0]
-            tag = word_tag[1]
-            if word_tag in word_bank:
-                self._handle_exact_word_match(category, word_bank, word_tag)
-            elif tag[0] in Utils.tags and word not in Utils.domain_specific_words:
-                self._handle_similar_word_match(category, word_bank, word_tag)
-                # add to list of matched words
-        return
 
-    def _handle_similar_word_match(self, category, word_bank, word_tag):
-        # no exact match of word, either use Wordnet's synset,
-        #  or see if the similarity score already exists in knowledge base from past synset evaluation
-        # only match word once for each question
-        best_match_words, best_similarity_score = self._get_best_word_matches(word_bank, word_tag)
-        matched_question = []
-        for best_match_word_tag in best_match_words:
-            # there was a best match, retrieve CFD that contains FAQs which have that syn
-            # self.evaluation_bank[best_match_word] = []
-            for related_question_id in word_bank[best_match_word_tag].keys():
-                if related_question_id not in matched_question:
-                    matched_question.append(related_question_id)
-                    score = word_bank[best_match_word_tag][related_question_id]
-                    # associate qid to matched word pair for feedback later
-                    self.id_to_wordpair_dict.setdefault(related_question_id, []).append((word_tag, best_match_word_tag))
-                    # make similarity score reduce a bit, prefer exact match
-                    self.evaluation_bank.setdefault(best_match_word_tag, []).append(
-                        [related_question_id, score * best_similarity_score * 0.8, category])
+def parse_tokens(tokens, overall_msg, var_list, ind=0):
+    """ Parses the character tokens in a message, and replaces occurences of string concatentation with parameterization. Adjacent strings are combined together, and variables are replaced with format anchors.
 
-    def _get_best_word_matches(self, word_bank, word_tag):
-        word = Word(word_tag[0])
-        tag = word_tag[1]
-        syn_sets_with_tag = word.get_synsets(pos=Utils.tags[tag[0]])
-        syn_sets_wo_tag = word.get_synsets()
-        best_similarity_score = 0.2
-        best_match_words = []
-        for related_word_tag in word_bank:
-            # related_word = related_word_tag[0]
-            related_tag = related_word_tag[1]
-            if related_tag[0] in Utils.tags:
-                # if similarity has been calculated previously, pull out similarity score
-                similarity_score = self.knowledge_bank.instance.word_pair_similarity.setdefault(frozenset((word_tag,
-                                                                                                           related_word_tag)),
-                                                                                                self._calculate_similarity(
-                                                                                                    related_word_tag,
-                                                                                                    syn_sets_with_tag,
-                                                                                                    syn_sets_wo_tag))
-                if similarity_score >= best_similarity_score:
-                    if similarity_score > best_similarity_score:
-                        best_similarity_score = similarity_score
-                        best_match_words = []
-                    best_match_words.append(related_word_tag)
-        return best_match_words, best_similarity_score
+      Args:
+          tokens (string): string of characters in the original message
+          overall_msg (list<string>): Forms the parameterized logging message with format anchors
+          var_list (list<string>): Variables in the logging message
+          ind (int): index of the character token to start parsing form
 
-    def _calculate_similarity(self, related_word_tag, syn_sets_with_tag, syn_sets_wo_tag):
-        ref_tb_word = Word(related_word_tag[0])
-        related_tag = related_word_tag[1]
-        ref_syn_sets = Dictionary.synset_map.get(ref_tb_word.lemmatize(), ref_tb_word.get_synsets(pos=Utils.tags[
-            related_tag[0]]))
-        similarity_score = self._get_path_similarity(syn_sets_with_tag, ref_syn_sets)
-        # account for case where tagging is wrong
-        # print(word_tag, related_word_tag, similarity_score)
-        if similarity_score == 0:
-            # consider no tag
-            similarity_score = self._get_path_similarity(syn_sets_wo_tag, ref_syn_sets)
-        return similarity_score
+      Returns:
+          list<string>: Forms the parameterized logging message with format anchors
+          list<string>: Variables in the logging message
+          int: index of semi-colon or end of line
 
-    def _handle_exact_word_match(self, category, word_bank, word_tag):
-        # an exact match is found
-        for related_question_id in word_bank[word_tag].keys():
-            score = word_bank[word_tag][related_question_id]
-            # print(word, related_question, score)
-            # print(key, score)
-            self.evaluation_bank.setdefault(word_tag, []).append([related_question_id, score, category])
-            # store matched words
-            self.id_to_wordpair_dict.setdefault(related_question_id, []).append((word_tag, word_tag))
-            # save into dict that maps word pair to similarity score
-            # self.knowledge_bank.instance.word_pair_similarity[(word_tag, word_tag)] = 1
+    """
+    is_end = ind >= len(tokens) or tokens[ind] == ';'
+    if is_end:
+        return overall_msg, var_list, ind
+    else:
+        if tokens[ind] == '"':  # Parse string
+            string, next_ind = parse_string(tokens, ind + 1)
+            overall_msg.append(''.join(string))
+        elif tokens[ind].isalnum() or tokens[ind] == '(':  # Parse variable
+            variable, next_ind = parse_var(tokens, ind)
+            var_list.append(variable)
+            overall_msg.append(FORMAT_ANCHOR)  # Insert format anchor
+        else:  # Move to next token
+            next_ind = ind + 1
+        return parse_tokens(tokens, overall_msg, var_list, next_ind)
 
-    def _find_word_bank(self, category, slot):
-        if not slot:
-            # an unknown interrogative word: go to the default slot
-            word_bank = self.knowledge_bank.get_word_bank(category, "DEFAULT")
-        else:
-            # retrieve CFD from slot
-            word_bank = self.knowledge_bank.get_word_bank(category, slot)
-            current_category = category
-            while not word_bank.conditions():
-                # CFD is empty, explore the general roles
-                general_role = current_category.get_general_role()
-                if general_role:
-                    current_category = general_role[0]
-                    word_bank = self.knowledge_bank.get_word_bank(current_category, slot)
-                else:
-                    break
-            current_categories = [category]
-            while not word_bank.conditions():
-                # CFD is still empty, explore the specific roles
-                next_categories = []
-                word_bank = ConditionalFreqDist()
-                for current_category in current_categories:
-                    specific_roles = current_category.get_specific_roles()
-                    if specific_roles:
-                        next_categories.extend(specific_roles)
-                        for specific_role in specific_roles:
-                            sub_bank = self.knowledge_bank.get_word_bank(specific_role, slot)
-                            for word_tag in sub_bank:
-                                for question in sub_bank[word_tag]:
-                                    word_bank[word_tag][question] = sub_bank[word_tag][question]
-                current_categories = next_categories
-                if not current_categories:
-                    break
-            # can't find a specific or general role that could answer the question, go back to default slot of frame
-            if not word_bank.conditions():
-                word_bank = self.knowledge_bank.get_word_bank(category, "DEFAULT")
-        return word_bank
 
-    @staticmethod
-    def _get_path_similarity(syn_sets, ref_syn_sets):
-        max_sim = 0
-        for syn_set_1 in syn_sets:
-            for syn_set_2 in ref_syn_sets:
-                sim = syn_set_1.path_similarity(syn_set_2)
-                if sim and sim > max_sim:
-                    max_sim = sim
-        return max_sim
+def parse_string(tokens, ind):
+    """ Retrieves a string from the character tokens, starting from a specified index.
+      Args:
+          tokens (string): string of characters in the original message
+          ind (int): index of the character token to start parsing form
 
-        # @staticmethod
-        # def get_common_ngrams(questions, list_of_n):
-        #     n_gram_dict = {}
-        #     common_n_grams = {}
-        #     for n in list_of_n:
-        #         common_n_grams[n] = []
-        #         for question in questions:
-        #             n_grams = question.ngrams(n)  # List of WordList
-        #             for n_gram in n_grams:
-        #                 n_gram_string = ' '.join(n_gram)
-        #                 if n_gram_string in n_gram_dict:
-        #                     count = n_gram_dict[n_gram_string][1] + 1
-        #                 else:
-        #                     count = 1
-        #                 n_gram_dict[n_gram_string] = [n_gram, count]
-        #         for _, count in n_gram_dict.items():
-        #             # only return n grams that occur more than 3 times
-        #             if count[1] >= 3:
-        #                 common_n_grams[n].append(count[0])
-        #     return common_n_grams
+      Returns:
+          string: String retrieved from the message, starting from the index
+          integer: Next index to continue parsing from
+      Raises:
+          CurlyBracketException: when consecutive curly brace {} is present in the tokens
+
+    """
+    string_overall_msg = []
+    while tokens[ind] != '"':
+        if tokens[ind:ind + 2] == '{}':  # ignore messages with curly brackets
+            log("Exception", "Throw curly brackets exception")
+            raise CurlyBracketsException()
+        string_overall_msg.append(tokens[ind])
+        if tokens[ind] == '\\':  # escape character, consider next character
+            string_overall_msg.append(tokens[ind + 1])
+            ind += 1
+        ind += 1
+    return ''.join(string_overall_msg), ind + 1
+
+
+def parse_var(tokens, ind):
+    """ Retrieves a variable from the character tokens, starting from a specified index.
+      Args:
+          tokens (string): string of characters in the original message
+          ind (int): index of the character token to start parsing form
+
+      Returns:
+          string: variable retrieved from the message, starting from the index
+          integer: next index to continue parsing from
+
+    """
+    current_var = []
+    bracket_num = 0
+    while ind < len(tokens) and (bracket_num > 0 or tokens[ind] == '('
+                                 or tokens[ind].isalnum()
+                                 ):  # it is still a variable, continue parsing
+        current_var.append(tokens[ind])
+        if tokens[ind] == '(':
+            bracket_num += 1
+        elif tokens[ind] == ')':
+            bracket_num -= 1
+        ind += 1
+    return ''.join(current_var), ind + 1
+
+
+def parse_file(f, k_regex):
+    """ Iterates through lines in the file, and convert each line containing the keyword regex into the parameterized form.
+      Args:
+          f: file object to parse
+          k_regex: regex of keyword
+
+      Returns:
+          list<string>:  all lines in the file, with those containing the keyword converted to its parameterized form
+          list<(int, string)>: tuple of (line_number, converted_content) of lines that are changed in the file
+
+    """
+    output = []
+    changes = []
+    for line_idx, file_line in enumerate(f):
+        log("Line", file_line)
+        preceding_section, tokens = get_tokens(file_line, k_regex)
+        if not (preceding_section and tokens):
+            output.append(file_line)
+            continue
+        try:
+            logging_msg, variables, comments = parse_line(tokens)
+            converted_line = "{}\"{}\", {});{}\n".format(
+                preceding_section, logging_msg, variables, comments)
+            log("Final overall_msg", converted_line)
+            output.append(converted_line)
+            changes.append((line_idx + 1, converted_line))
+        except CurlyBracketsException:
+            output.append(file_line)
+            continue
+        log()
+    return output, changes
+
+
+def parse_line(tokens):
+    """ Converts the logging statement into the parameterized form. Processes the following lines if the logging spans multiple lines
+         Args:
+            tokens: list of characters in the 1st line of the logging statement
+
+         Returns:
+             string:  logging message with format anchor
+             string:  variables delimited by comma
+             string:  comments following the logging statement
+    """
+    str_list, var_list, ind = parse_tokens(tokens, overall_msg=[], var_list=[])
+    while ind > len(tokens) - 1:  # logging spans multiple lines
+        next_line = next(f)  # continue parsing next line
+        tokens = list(next_line.lstrip(' ').lstrip('\t'))
+        str_list, var_list, ind = parse_tokens(
+            tokens, overall_msg=str_list, var_list=var_list)
+    logging_msg = ''.join(str_list)
+    variables = ', '.join(var_list)
+    comments = ''.join(
+        tokens[ind + 1:]
+    ) if ind < len(tokens) else ''  # remaining characters are comments
+    return logging_msg, variables, comments
+
+
+def get_tokens(file_line, keyword_regex):
+    """ Searches for keyword in line to retrieve tokens containing it
+         Args:
+            file_line: line in file to search for the keyword
+            keyword_regex: regex of keyword to search for
+
+         Returns:
+             string:  substring from the start of file_line to the keyword_regex (including the keyword regex itself)
+             tokens:  substring from after the keyword_regex to the end of the string
+    """
+    match_comment = re.search(r'//', file_line)
+    match_keyword = re.search(
+        r'(?<=\b' + keyword_regex + '\()((?!\{.*\}).)*.*$', file_line)
+    is_valid = match_keyword and not (
+        match_comment and match_comment.start() < match_keyword.start())
+    if is_valid:
+        preceding_section = file_line[:match_keyword.start(
+        )]  # get section preceding the logging message (inclusive of keyword)
+        tokens = match_keyword.group()
+        return preceding_section, tokens
+    else:
+        return None, None
+
+
+if __name__ == "__main__":
+    # raw_args = ['-h']
+    parser = argparse.ArgumentParser(
+        description=
+        'Replace string concatenation with parameterization with slf4j logging',
+        epilog=EXPLANATION,
+        formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument(
+        "-m",
+        "--modify",
+        help="modify the input file in-place",
+        action="store_true")
+    parser.add_argument("regex", help="regex of keyword to look out for")
+    parser.add_argument("filename", help="name of file to refactor")
+    args = parser.parse_args()
+    with open(args.filename, 'r') as f:
+        converted_output, lines_changed = parse_file(f, args.regex)
+    if args.modify:
+        with open(args.filename, 'w') as f:
+            f.write(''.join(converted_output))
+    else:
+        change_log = '\n'.join([''.join(str(line)) for line in lines_changed])
+        print(change_log)
+    print('\n'.join([''.join(str(line)) for line in lines_changed]))
